@@ -1,0 +1,1147 @@
+---
+title: "Regression analysis of crime rate in North Carolina"
+author: 
+- Stone Jiang
+header-includes:
+  - \usepackage{dcolumn}
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+\section{Introduction}
+The purpose of this report is to understand the key determinants of crime in order to generate effective, actionable policy recommendations for political candidates running for election in the state of North Carolina (modified data provided). To achieve this goal, we will examine a cross-sectional dataset of crime rate in various counties of North Carolina in the year 1987. We provide three carefully interpreted linear regression models to explore the predictive power of the independent variables in this dataset with respect to our dependent variable crime rate, focusing on how potential relationships may be utilized for better control and detection of crime. This work will focus on addressing the overarching research question: What are the major deterrents and motivators of crime, and how does the existence of factors from both categories influence overall crime rate?
+
+Specifically, we will look to three subquestions to help narrow down our focus:
+
+1. How does fear of arrest and convictions deter crime across North Carolina? 
+2. How does wage for all types of employees influence overall crime rate? 
+3. What variables are strong predictors of crime, and at the same time are robust across the entire state, irrespective of location and population density? 
+
+We will provide rational for variable and model selection using both background information and automated methods. The development, evaluation, and interpretation of our models were divided in three stages, which can be found in sections \textit{Model 1}, \textit{Model 2} and \textit{Model 3}. Finally, the policy recommendations derived from this process are presented in the \textit{Policy Recommendations and Concluding Remarks} section.
+\pagebreak
+\section{Initial Data Cleaning}
+
+For this project, the dependent variable of interest is crime rate. Before choosing the best independent variables for our models, the data was examined and cleaned as follows. First, we omitted the last rows of the csv as they were empty and did not contain data. Second, we eliminated the one duplicated entries, as identified by unique county ID (193). Third, we verified that the datatype of all of our variables are consistent with expectation, and that no missing values were detected. Here, we converted the prbconv variable from a factor to a numeric variable. R initially read this variable as a factor due to omitted rows at the end of our having non-numerical values. This leaves us with data points for 90 counties.
+
+```{r message=FALSE, warning = FALSE, include = FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(caret)
+library(MASS)
+select <- dplyr::select # Unmask select from dplyr
+library(stargazer)
+library(tibble)
+library(grid)
+library(gridExtra)
+library(usmap)
+library(car)
+library(sandwich)
+library(lmtest)
+library(reshape2)
+
+full_data <- read.csv('crime_v2.csv')
+data <- na.omit(full_data)
+
+# Check for duplicated data and remove duplicates
+sum(duplicated(data))
+data <- distinct(data, .keep_all=T)
+
+# Convert prbconv factor in numeric
+data$prbconv <- as.numeric(levels(data$prbconv))[data$prbconv]
+
+# Check that all fields are numerical
+for (field in names(data)) {
+  stopifnot(class(data[,field]) %in% c("numeric", "integer"))
+  }
+```
+
+After this initial data cleaning, we identified columns we believed could be potential casual predictors of crime rate. N.B. county and year were disregarded in our models because they are identifiers.
+
+The variables west, central and urban are categorical, and came encoded as 0 and 1. This can be used directly in the regression as identifiers. For example, a regression model containing the variable "west" would have a non-zero coefficient for counties in the west, and a 0 coefficient for counties on the east.  We first looked to see whether the distribution of crime rate is different depending on the location (west vs central) and whether the county was urban. 
+
+```{r echo = FALSE }
+C <- data[, c('west', 'central', 'urban')]
+
+df.categorical <- data[, c('crmrte', 'west', 'central', 'urban')]
+colnames(df.categorical) <- c('crmrte', '2. West', '1. Central', '3. Urban')
+dt_long <- gather(df.categorical, key, value, -crmrte)
+
+ggplot(dt_long, aes(x = crmrte, y = factor(value))) +
+  geom_point() +
+  facet_grid(. ~ key) +
+  theme_classic()+
+  theme(plot.title = element_text(hjust = 0.5))+
+  labs(title="Crime rate distribution for central, west, and urban",
+       x='Crime rate', 
+       y = "County belongs to category?") +
+  scale_y_discrete(breaks=c(0,1), labels=c("False","True"))
+```
+
+For Central versus not Central North Carolina, the crime rate distribution is relatively even. Counties in Western North Carolina appear to have less crime on average than those labeled as not Western. Counties labeled as Urban have more crime on average.
+
+We next examined the dependent variable crime rate as defined by crime rate per capita.
+
+```{r echo = FALSE}
+summary(data$crmrte)
+ggplot(data = data, aes(x=crmrte)) +
+  geom_histogram(alpha=0.8, breaks=seq(0, 0.1, by=0.01)) +
+  labs(title='Histogram of crime rates for different counties',
+       x='Crime rate per person', 
+       y = "Count") +
+  theme_classic() +
+  ylim(0,25)+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_x_continuous(breaks=seq(0, 0.1, by=0.01)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=seq(0, 0.1, by=0.01))
+```
+
+First, we see that the mean crime rate across counties is higher than the median, at about 3.4 crimes per 100 people. The crime rate is greater than 0 for all counties and highly skewed toward larger values. For this project, we aimed to interpret our model coefficients as how changes in explanatory variables affect changes in crime rate. Since the baseline crime is different for different counties, it is beneficial to transform crime rate into the log of crime rate. This allows us to interpret changes in crime rate as a percentage, which makes comparisons across counties more meaningful For example, a 0.01 change in crime rate for the lowest county (0.005) is a much larger percent change than for the largest county (0.099), but a 1% change is comparable regardless of the baseline crime rate.
+
+The following figure shows a histogram of the logarithms of crime rate per county in North Carolina. 
+
+```{r echo = FALSE}
+data$crmrte_abs <- data$crmrte
+data$logcrmrte <- log(data$crmrte)
+ggplot(data = data, aes(x=logcrmrte)) +
+  geom_histogram(alpha=0.8, breaks=seq(-5.0, -2.5, by=0.25)) +
+  labs(title='Histogram of crime rates for different counties',
+       x='Log crime rate per person', 
+       y = "Count") +
+  theme_classic() +
+  ylim(0,25)+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_x_continuous(breaks=seq(-5.0, -2.5, by=0.25)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=seq(-5.0, -2.5, by=0.25))
+```
+
+The distribution of the logarithms of crime rate follow a closer to normal distribution with no outliers. This is also a desirable for the creation of predictive models. 
+
+\pagebreak
+
+\section{Model 1}
+
+\subsection{Key Variables}
+
+For our initial model, we would like to focus on factors that intuition says should influence crime. We believe that there are four variables which represent deterrents to crime: probability variables of arrest, conviction, prison sentence, and the severity of punishment in average sentence days. Collectively, we will call these variables the "fear factors." 
+
+For example, we believe the higher the chance someone believes they will be arrested, convicted, or sent to prison, the less likely they will commit a crime. Also, the more severely someone believes they will be punished for the crime (as measured by prison day sentences), the less likely they will commit a crime. Out of these four, we believe probability of arrest and probability of conviction will have the greatest effects. The reason is that a single arrest or conviction can permanently damage someone's record. For most people who have never committed crimes before, just the idea of possibly getting in trouble with the police could be enough to deter them. In addition, there are many crimes that result in fines, community service, and other forms of punishment that does not involve prison. 
+
+The wage variables can either deter or motivate individuals to commit a crime. We believe that the more satisfied someone is with their income, the less likely they will commit a crime because they are more likely to attain their desires without the need of illegal routes. Along the same lines, unemployment is likely to lead to increased crime rates. Too high of a wage, especially in blue collar jobs that are non-customer facing and physical in nature, means some employees can be "priced out". As wage goes up, individuals paid that wage are expected to do more, lowering the amount of workforce necessary, leading to greater unemployment.
+
+For our base model, we will look at only what we consider traditional blue collar jobs that are non-customer facing and physical in nature: construction and manufacturing. **We also take the log of all wage variables**: this is standard practice as we want to measure the effect of a percent changes in salary, and not absolute changes, a similar argument to taking the log of crime rate.
+
+```{r echo = FALSE}
+nonwage_variables <- c('prbarr', 'prbconv', 'prbpris', 'avgsen',
+                       'polpc', 'density', 'taxpc',
+                       'pctymle', 'pctmin80', 'mix',
+                       'urban', 'central', 'west')
+
+wage_variables <- c('wtrd', 'wfir', 'wser', 'wfed', 'wsta', 'wloc',
+                    'wcon', 'wtuc', 'wmfg')
+
+X_non_wage <- data[, names(data) %in% nonwage_variables]
+X_wage <- lapply(data[, names(data) %in% wage_variables], log)
+
+X_wage_transformed <- cbind(X_non_wage, X_wage)
+```
+
+Before performing EDA on the variables listed above, we note why we have chosen to exclude the other variables in our base model. Omitting these variables can potentially introduce bias into the model, but for the first model, we wish to only use the key determinants of crime.
+
+\subsection{Additional variables}
+
+We believe that density should be a positive predictor of crime. Previous studies have shown that, even though the relationship between population density and crime rate is complex, a highly dense population areas present higher crime rates up to about a density limit of 500 people per squared mile, which North Carolina falls under [1]. We will discuss density further in models 2 and 3.
+
+Tax could reflect how people vote [2]. Tax is also linked specifically to income-producing crimes [3]. According to the literature, for these specific kind of crimes, taxation has an important deterrent effect as it increases the risk criminals assume from these activities. Since we are not differentiating between kinds of crimes, this is left aside for now. 
+
+Percent young male may also be a potential strong predictor of crime in counties where young male have particularly bad influence. For example, criminologists believe that women are always less likely to commit crimes than men [4]. 
+
+We will not consider the variable "mix,"" because we are interested in crime rate regardless of the nature of the offense. 
+
+For all other variables, we will consider them in models 2 and 3, and in our final recommendations.
+
+\subsection{EDA and a note on "probability" variables}
+
+For our 4 variables, we first performed EDA to ensure that we had reasonable data. We plotted a grid of histograms and look at the distribution of the explanatory variables.
+
+```{r echo = FALSE}
+hist.wcon <- ggplot(data = X_wage_transformed, aes(x=wcon)) +
+  geom_histogram(alpha=0.8, breaks=seq(5.1, 6.2, by=0.1)) +
+  labs(title='Log (Construction Wage) Histogram',
+       x='Log of construction wage', 
+       y = "Count") +
+  theme_classic() +
+  ylim(0,35)+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_x_continuous(breaks=seq(5.1, 6.2, by=0.1)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=seq(5.1, 6.2, by=0.1))
+
+hist.wmfg <- ggplot(data = X_wage_transformed, aes(x=wmfg)) +
+  geom_histogram(alpha=0.8, breaks=seq(4.8, 6.8, by=0.2)) +
+  labs(title='Log (Manufacturing Wage) Histogram',
+       x='Log of manufacturing wage', 
+       y = "Count") +
+  theme_classic() +
+  ylim(0,45)+
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_x_continuous(breaks=seq(4.8, 6.8, by=0.2)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=seq(4.8, 6.8, by=0.2))
+hist.prbarr <- ggplot(data = X_wage_transformed, aes(x=prbarr)) +
+  geom_histogram(alpha = 0.8, breaks=seq(0,1.2,0.1)) + 
+  labs(title = "Probability of Arrest Histogram",
+       x = "Probability of arrest",
+       y = "Count") + 
+  theme_classic() + 
+  ylim(0,40)+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks=seq(0,1.2,0.1)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=seq(0, 1.2, by=0.1))
+hist.prbconv <- ggplot(data = X_wage_transformed, aes(x=prbconv)) +
+  geom_histogram(alpha = 0.8, breaks=seq(0,2.4,0.2)) + 
+  labs(title = "Probability of Conviction Histogram",
+       x = "Probability of conviction",
+       y = "Count") + 
+  theme_classic() + 
+  ylim(0,45)+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks=seq(0,2.4,0.2)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=seq(0, 2.4, by=0.2))
+grid.arrange(hist.wcon, hist.wmfg, 
+             hist.prbarr, hist.prbconv,
+             nrow=2, ncol=2)
+```
+
+We see that the log of the two wage variables have no outliers. Both are somewhat upward skewed in that there are more data points above the mode of each, but overall, the distribution looks fairly symmetric. 
+
+For the probability of arrest, defined as the number of arrests to offences, the general trend is a skew to the right, with one datum above 1. An explanation for this is that we are looking at a cross-sectional data pooled from a multi-year study. For example, if data collection started in June of one year, and people committed an offence in January of that year but not arrested until after June, that person could appear in this data set as having been arrested but not committing an offence. As a result, this variable is not precisely probability, but rather a metric variable indicating level of arrest per offense.
+
+For the probability of conviction, defined as ratio of conviction to arrests, there are many more data points skewed to the right. This variable is confounded by the fact that one does not necessarily need to be arrested to be convicted of a crime. Another mechanism is a citation, which are issued in place of arrests for smaller crimes. Therefore, it is reasonable for this variable to exceed 1 as well.
+
+\subsection{Model and Coefficient Interpretation}
+
+We now build our regression model. **Note that in the EDA, we had previously log transformed all wage variables, and stored them within the X_wage_transformed data frame.**
+
+```{r echo = FALSE}
+#first model; log of crime rate regressed on prbarr, prbconv, log(wcon), log(wmfg)
+model_1 <- lm(data$logcrmrte ~ prbarr + prbconv + wcon + wmfg, data = X_wage_transformed)
+print(model_1)
+```
+The coefficient for prbarr represents the effect of the variable prbarr on crime rate. Specifically, keeping all other variables constant, we can convert this coefficient to an exact change. For every 0.1 unit increase in prbarr:
+
+$$
+\begin{aligned}
+\% \Delta \text{crmrte} &= 100 * [\exp(\beta*\Delta\text{prbarr}) - 1]\\
+&= 100 * (e^{-1.6815 * 0.1} - 1)\\
+&\approx -15.5\%
+\end{aligned}
+$$
+
+we expect a -15.5% change in crime rate (or 15.5% decrease in crime rate). Since this variable represents the "fear factor" we presented above, this provides support for our hypothesis that the effection is negative. An analogous interpretation can be said for probability of conviction. Keeping all other variables constant, for a 0.1 increase in prbconv:
+
+$$
+\begin{aligned}
+\% \Delta \text{crmrte} &= 100 * [\exp(\beta*\Delta\text{prbarr}) - 1]\\
+&= 100 * (e^{-0.7070   * 0.1} - 1)\\
+&\approx -6.83\%
+\end{aligned}
+$$
+we see a 6.83% decrease in crime. With these variables, we measure how a perceived probability of getting in trouble with the legal system deters crime. These seem to be practically signficant as they consistitute large percent decreases in crime.
+
+The coefficients on the wage variables represents how a percent change in average wage in that industry relates to a percent change in crime rate. This can be used directly in the interpretation since these coefficients are small. Namely, keeping all other coefficients constant, a 1% increase in construction wage leads to a 0.47% increase in crime rate, while a 1% increase in manufacturing leads to a 0.54% increase in crime rate. This is consistent with our hypothesis as well. Even though the changes are small (and likely practical insignificant), we may be observing the fact that more people are losing their jobs as wages increase (and labor per individual also increases).
+
+\subsection{Classical Linear Model Assumptions}
+
+At this point, we will evaluate the Classical Linear Model Assumptions, and perform hypothesis testing to see whether each of our coefficients are statistically significant.
+
+**CLM 1: Linear in parameters**
+
+Nothing to assess here. We define the model with an error term such that the parameters are linear (and assume this model is the population model and estimate its parameters). The independent variables can be transformed in any way, including taking logs as we have done.
+
+$$
+y = \beta_0 + \beta_1x_1 +  \beta_2x_2 + ...+ \beta_kx_k+ u
+$$
+
+**CLM 2: Random Sampling**
+
+This is a rare case where we actually have a majority of the population at hand. We are interested in crime rate in the state of North Carolina, which has 100 counties. We have data for 90 of these counties. We can generate a visualisation to see where which counties were eliminated to see if there was systematic geographic bias. This is done with the plot_usmap package.
+
+```{r echo = FALSE}
+data$fips <- 37*1000 + data$county
+plt_data <- select(data, fips, crmrte_abs)
+
+plot_usmap('counties', include = 'NC', data = plt_data, values='crmrte_abs')+ 
+  scale_fill_continuous(low='white', high='red') + 
+  labs(title = "Crime Rate in North Carolina in 1987", fill="Crime rate")+
+  theme(legend.position = c(0,0.4))
+```
+
+We see that the 10 counties without data (in black) are somewhat clustered along the eastern and western/north western boarders of North Carolina. But since we have data points for even clustered geographic regions where data is missing, we should be able to draw fairly reasonable conclusions about crime in the state as a whole.
+
+Within each county, which we can view as our available population, we have no reason to believe that the sampling was not random, or even in some cases a consensus. For example, it is not hard to imagine that the crime rate per capita could be calculated from police records as a consensus. Our police per capita, data from the FBI, is also likely a consensus. Wage variables are likely a sample of employees, at least from available data reported to the IRS. We have no reason to believe that this sample was biased in any way. Overall, given the limited information, we have little reason to drastically doubt an IID sample within our available population of 90 counties.
+
+**CLM 3: No perfect multi-collinearity**
+
+First, multi-collinearity is guaranteed when we have more features than samples, which is not the case here. Second, multi-collinearity can occur when one variable is a perfect linear combination of another set of variables. In that case, the one of those variables are regressed on the remaining of the group, the R^2 will be 1. R would have warned us if this were the case (by evaluating whether the covariance matrix is singular), so we have fulfilled this requirement. We can further evaluate this using the VIF for each coefficient to evaluate whether some degree of multicollinearity should be of worry. This is done as follows. 
+
+```{r echo = FALSE}
+vif(model_1)
+```
+We see that all VIF factors are significant below 4, which means we do not have significant multi-collinearity to worry about.
+
+**CLM 4: Zero Conditional Mean**
+
+Zero conditional mean states that the expected value of the error term is 0 for all values of the independent variables $x_k$.
+
+$$
+E(u | x_1, x_2, ..., x_k) = 0
+$$
+Under zero conditional mean, we expect that the residuals on the residuals versus fitted value plot to have an expected value of 0 across the board. To check this, we plot the residual agains the fitted values for our set. 
+
+```{r echo = FALSE}
+plot(model_1, which = 1)
+```
+
+Based on this plot, we see that unfortunately, the line adopts a U shape. However, the curvature is a result of very few data points on the extreme ends of the fitted values. In the middle where the bulk of our data is, from -4 to just before -3, the line seems flat and centered around 0. However, above 3, the 6 data points are all above 0. The conclusion is that our model most likely does not satisfy CLM 4. We will need to adjust our model by adding more parameters in order to capture more of the variation in crime rate due to omitted variables.
+
+**CLM 5: Homoskedasticity**
+
+Homoskedasticity assumption is that the variance of the error terms are constant for any combination of $x_k$ values. 
+
+$$
+Var(u | x_1, x_2, ..., x_k) = \sigma^2
+$$
+Examining the fitted values versus residuals plot above, while the spread (larger the spread the greater the estimated variance) appears to be slightly larger around fitted values of around 3.75 (around -1 to 0.5) than around 4 (around -0.5 to 0.5), overall there are no major observable patterns in differences in variance as a function of x.
+
+We can also check the scale-location plot. If homoskedasticity were achieved, we would expect a horizontal line across this plot:
+
+```{r echo = FALSE}
+plot(model_1, which=3)
+```
+We see that this line is roughly horizontal from -5 to -3. The only major curvature is the single data point around -5.5. However, this is likely due to small sample size for that particular fitted values. Discrepancies such as that observed are much more likely when the sample size is small. This indicates that we most likely have close to homoskedasticity. 
+
+One way to test for homoskedasticity is the Breusch-Pagan Test. The null hypothesis of the test states that we have homoskedasticity. We will test at a standard significance level of 0.05.
+
+$$
+\begin{aligned}
+H_0: &\text{ Homoskedasticity}\\
+H_a: &\text{ Heteroskedasticity}
+\end{aligned}
+$$
+
+```{r echo = FALSE}
+bptest(model_1)
+```
+Since the $p-value >> 0.05$, we fail to reject the null hypothesis that we have homoskedasticity. 
+
+In any case, it is good practice to almost always use heteroskedastic robust errors, especially since we have some doubt from the residuals versus fitted values plot.
+
+**CLM 6: Normality**
+
+CLM 6 assumes that population error is independent of the explanatory variables $x_1$ through $x_k$, and that the error term is normally distributed with mean 0 and constant variance. We can check this with the qqplot of the fitted values versus residuals plot.
+
+```{r echo = FALSE}
+plot(model_1,which=2)
+```
+
+Not even counting the exception of extreme values, the data points wavering back and forth, which could indicate a kurtosis problem. We can further visualise the residuals in a histogram.
+
+```{r echo = FALSE}
+bins <- seq(-1.2,1,0.1)
+ggplot(data = as.data.frame(model_1$fitted.values), aes(x=model_1$residuals))+
+  geom_histogram(alpha=0.8, breaks=bins)+
+  labs(title='Histogram of Residuals',
+       x='Value of Residual', 
+       y = "Count") +
+  theme_classic() +
+  #ylim(0,2200)+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks=seq(-1.2, 1, 0.3)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=bins
+           )
+```
+Based on the histogram, the data does not appear very normal. In fact, it is somewhat bimodal around -0.4, and 0.2. 
+
+In any case, since our sample size 90 is much greater than 30, asymptotics also kicks in, ensuring that the sampling distribution of our coefficients are approximately normal. This will be important in statistical testing.
+
+Finally, we would like to check and see if there are any outliers in our model that might have significant influence:
+
+```{r echo = FALSE}
+plot(model_1, which=5)
+```
+We see that data point 51 could be problematic. Its Cook's distance is still below 1, which means it does not have high enough influence for us to worry about at the moment.
+
+We will now perform statistical testing to see whether the four coefficients we included are statistically significant. To do this, we derive heteroskedastic errors from the vcovHC function from the sandwich package. This function produces a covariance matrix, and the standard errors are the square root of the diagnal.
+
+```{r echo = FALSE}
+se.model_1<-sqrt(diag(vcovHC(model_1)))
+se.model_1
+```
+
+We see that prbarr and wcon have the largest standard errors. In order to look at the statistical significance of our statistics, we can perform a t-test using the robust standard errors. Since we have large sample size, the sampling distribution of our statistic is approximately normal, so our statistic is distributed as a t-distribution:
+
+$$
+\frac{\hat{\beta_j} - \beta_j}{se(\hat{\beta_j)}} \sim t_{n-k-1}
+$$
+For all the 4 betas, we will use a 2-sided test as significance level 0.05
+
+$$
+\begin{aligned}
+H_0: & \beta_j=0 \\
+H_a: & \beta_j\ne 0
+\end{aligned}
+$$
+
+To perform the test for all of the variables, we use the coeftest package, specifying the degrees of freedom as sample size - 4 (number parameters except beta_0) - 1, and the heteroskedasticity-consistent estimation of the covariance matrix. 
+
+```{r echo = FALSE}
+model_1.tests<-coeftest(model_1, vcov = vcovHC, df=dim(X_wage_transformed)[1] - 4 - 1)
+model_1.tests
+```
+
+Based on the statistical test, we see that both the probability of arrest and probability of conviction are both highly significant variables with p-values << 0.001, while the wage of construction is not statistically significant. The wage of manufacturing is somewhat statistically significant, with a p-value close to 0.05. 
+
+Based on this simple, we have evidence to support the following answers to our research questions:
+
+1. Fear of arrest and conviction are both likely highly significant factors in deterring crime.
+2. Blue collar wages in industries that are non-customer facing and primarily physical labor in nature are positively correlated with crime. We have yet to determine how other wages related to crime rate. 
+
+To make a definitive policy recommendation, we will require additional exploration of other co-variates in our other models.
+
+\pagebreak
+
+\section{Model 2}
+
+\subsection{Exploration of independent variables}
+
+For model 2, we wanted to add in other covariates meant to increase accuracy of prediction. To do this, we wanted to first get a sense of crmrte correlation with all numeric variables. We also parse our data into X (numeric variables) and y (crmrte)
+
+```{r echo = FALSE }
+y <- data$logcrmrte
+X <- data[,!names(data) %in% c('county', 
+                              'year', 
+                              'crmrte',
+                              'west',
+                              'central',
+                              'urban',
+                              'crmrte_abs',
+                              'logcrmrte')]
+
+
+#correlate all variables and store in new dataframe
+cor_df <- data.frame(variable = character(),
+                     crmrte_cor = numeric())
+for (x in names(X)) {
+  crmrte_cor <- cor(y, data[,x])
+  corr <- as.data.frame(crmrte_cor, 
+                        col.names = c('crmrte_cor')) %>%
+                        add_column(variable = x, .before = 1)
+  cor_df <- rbind(cor_df, corr)
+}
+
+cor_df <- arrange(cor_df, desc(crmrte_cor))
+print(cor_df)
+```
+
+It should be no surprise that density is the best single positive predictor of crime rate. Highly dense population areas present more opportunities for crime, and also have larger wealth gaps. We would like to exclude this variable from our regression model 2, and instead, we will save this variable for model 3 in order to check the robustness of our model 2. This will be used address our third research question: can we develop a model robust across the entire state, irrespective of county and density within each county? Furthermore, urban is a similar categorical variable that is directly related to density, and will serve the same purpose in model 3.
+
+Surprisingly, wfed is the second best single predictor of crime rate, which seems surprising. It is difficult to rationalize this relationship from theory. Instead, we first perform a bivariate regression to see if any influential outliers are present.
+
+```{r echo = FALSE}
+mod.wfed <- lm(data$logcrmrte ~ X_wage_transformed$wfed)
+plot(mod.wfed, which = 5)
+```
+We can see that all data points have low Cook's distance, significantly less than 1. As a result, we do not have any outliers. We can also visually inspect the fit and come to the same conclusion that most data points fit well on the regression line, and those with large residuals are not significantly altering the slope of the fit.
+```{r echo = FALSE}
+plot(X_wage_transformed$wfed, data$logcrmrte, main='Regression of federal wages versus crime rate',
+     xlab = 'log of weekly federal wages',
+     ylab = 'log of crime rate per capita')
+abline(mod.wfed)
+```
+
+We will now take a closer look at the rest of the wage variables by generating an all-to-all correlation plot of each of the wages.
+
+\subsection{Wages Variables}
+
+At this point, it is important to mention that there has been previous research showing that lack of satisfaction with wages is an important predictor of crime rate [5]. Therefore, the analysis presented in this section is a relevant part of the EDA and variable selection for this project.  
+
+```{r echo = FALSE}
+nonwage_variables <- c('prbarr', 'prbconv', 'prbpris', 'avgsen',
+                       'polpc', 'density', 'taxpc',
+                       'pctymle', 'pctmin80', 'mix',
+                       'urban', 'central', 'west')
+
+wage_variables <- c('wtrd', 'wfir', 'wser', 'wfed', 'wsta', 'wloc',
+                    'wcon', 'wtuc', 'wmfg')
+
+X_non_wage <- data[, names(data) %in% nonwage_variables]
+X_wage <- data[, names(data) %in% wage_variables]
+
+heatmap.data <- melt(cor(X_wage))
+ggplot(data = heatmap.data, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()+
+  labs(title='Correlation matrix of wage variables',
+       x='', 
+       y = "") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+  
+```
+
+Interestingly, wser and wsta are both relatively dark compared to the rest of the data set. If the data was accurate, then that's a good indication of strong independent predictors within the wage category, so we perform EDA to ensure that these variables are reasonable:
+
+```{r echo = FALSE}
+hist.wser <- ggplot(data = data, aes(x=wser)) +
+  geom_histogram(alpha = 0.8, breaks=seq(0,2200,100)) + 
+  labs(title = "Histogram of service industry wages",
+       x = "Average service industry wage",
+       y = "Count") + 
+  theme_classic() + 
+  ylim(0,80)+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks=seq(0,2200,100)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=seq(0,2200,100))
+hist.wsta <- ggplot(data = data, aes(x=wsta)) +
+  geom_histogram(alpha = 0.8, breaks=seq(200,550,50)) + 
+  labs(title = "Histogram of state employee wages",
+       x = "Average state employee wage",
+       y = "Count") + 
+  theme_classic() + 
+  ylim(0,45)+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks=seq(200,550,50)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=seq(200,550,50))
+grid.arrange(hist.wser, hist.wsta,
+             nrow=2, ncol=1)
+```
+
+The state wage is somewhat right skewed, likely because regions with more highly ranked officials make more than most average employees. However, there is not any red flags. However, we see that there's a huge outlier in service industry wages, more than 10 fold. Very likely this is an error in which the decimal was shifted by 1. The county is Warren County, which is not known to have atypical service industry wages. Even if the data point is accurate, it may be significantly skewed due to non-random sampling of CEOs rather than general workers. Therefore, we strongly believe this data point is incorrect and does not represent our target population. We choose to fix this point by changing the value to the average wser across the state. After doing this, we then plot the all-to-all correlation matrix again.
+
+
+```{r echo = FALSE}
+data$wser <- ifelse(data$wser>1000, mean(data$wser), data$wser)
+X_wage_transformed$wser <- log(data$wser)
+
+X_wage <- X_wage_transformed[, names(X_wage_transformed) %in% wage_variables]
+heatmap.data <- melt(cor(X_wage))
+ggplot(data = heatmap.data, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()+
+  labs(title='Correlation matrix of wage variables with wser fixed',
+       x='', 
+       y = "") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+```
+A corrected wser now has a weak correlation with all other wage variables. wsta still represents a good independent predictor, and wfed is the single best predictor of crime in the wage category of variables.
+
+\subsection{Police per Capita}
+
+It was previously stated that more police could result in stronger detection of crime. This effect has been previously studied and observed for violent crimes [6]. Therefore we look into the effect of the police per capita variable. 
+
+```{r echo = FALSE}
+breaks = seq(0,0.01,0.001)
+ggplot(data = data, aes(x=polpc)) +
+  geom_histogram(alpha = 0.8, breaks=breaks) + 
+  labs(title = "Histogram of police per capita",
+       x = "Police per capita",
+       y = "Count") + 
+  theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks=breaks) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=breaks)
+```
+
+Again, we see a significant outlier. However, we believe this could be real for the following reason.
+
+```{r echo = FALSE}
+report <- rbind(data[51, c('crmrte_abs', 'prbarr', 'prbconv', 'polpc')],
+                as.data.frame(lapply(select(data, crmrte_abs, prbarr, prbconv, polpc), mean)))
+rownames(report) <- c('outlier county', 'state average')
+stargazer(report,type='text', summary = FALSE)
+```
+
+The probability of arrest for this outlier is more than 3x state average, as is the probability of conviction. The police force is 4.5 times the state average. More police in a county means more crime gets detected and responded to in a timely fashion. Interestingly, the rate of crime is about 5-6x less than state average. This is likely a result of the fact that people are less likely to commit crime because they know the police is highly effective, and any crime that is caught will likely lead to more arrests. This is all to say that we actually believe this is a legitimate data point.
+
+\subsection{Demographic and Geographic Variables}
+
+We believe percent minority will be a good independent predictor of crime. Minorities are more likely to be targeted for the police, especially in rural regions [7]. Young male won't be considered a priority because the nature of the crime is not specified. If the data was only for example, petty theft, perhaps young male would be a good predictor.
+
+We saw previously that eastern and western N.C. had apparently different crime rates, and will explore the effects of these variables within the context of our model. 
+
+\subsection{Prison and prison sentence}
+
+Due to the significance of the fear variables we included in model 1, we also believe that probability and length of prison sentence are both potentially important and would like to evaluate these variables co-variates in model 2. 
+
+\subsection{Model 2 Variables}
+
+At this point, we've outlined a few variables both from model 1 and EDA that we think would be fruitful to include in our model 2. In order to perform variable selection in an automated fashion, we begin with a global AIC optimization using a combination of forward and backward selection, and then apply hypothesis testing to further adjust our model. 
+
+```{r echo = FALSE}
+names_not_include <- c('density', 'urban')
+
+y <- data$logcrmrte
+X_stepwise <- X_wage_transformed[, !(names(X_wage_transformed) %in% names_not_include)]
+
+model_upper <- lm(y ~ ., data=X_stepwise)
+model_lower <- lm(y ~ 1, data=X_stepwise)
+
+AIC.mixed <- stepAIC(model_upper,
+                     trace = FALSE,
+                     direction = 'both',
+                     scope = list(upper=model_upper,lower=model_lower))
+AIC.mixed
+```
+
+First, we happily see that the insignificant wcon wage variable (and the somewhat signficant wmfg) in our first model did not show up in this AIC optimized model. The AIC mixed model selected a lot of the same variables from our EDA, with the addition of two variables, percent young male, and tax revenue per capita. The model did not include the probability of prison and length of prison sentence. We will evaluate these with separate specifications.
+
+\subsection{Hypothesis Testing for further model and variable selection}
+
+First, we test the significance of the coefficients generated by the AIC minimized model. Note that we have yet to evaluate the CLM for the AIC.mixed model. However, due to asymptotics, we know that the t-test can be used as long as we use robust standard errors in case we have hetereoskedasticity. 
+
+For all the betas, we will use a 2-sided test as significance level 0.05:
+
+$$
+\begin{aligned}
+H_0: & \beta_j=0 \\
+H_a: & \beta_j\ne 0
+\end{aligned}
+$$
+
+To perform the test for all of the variables, we use the coeftest package, specifying the degrees of freedom as sample size - 8 (number parameters except beta_0) - 1, and the heteroskedasticity-consistent estimation of the covariance matrix.
+
+
+```{r echo = FALSE}
+coeftest(AIC.mixed, vcov. = vcovHC, df=dim(X_wage_transformed)[1] - 8 - 1)
+```
+
+All coefficients are significant (p<0.05) with the exception of taxpc and pctymle. For all variable coefficient except taxpc and pctymle, we reject the null hypothesis and state that the coefficient is in fact not zero. 
+
+Same cannot be said about percent young male, and taxpc. However, the test evaluates each individual coefficient on their own. It could be that these two variables are jointly significant in the following fashion: both variables could just be proxies for number of families with children. People with families are more likely to vote in support of better schools and safety for their families, resulting in higher taxes. In this case, these variables could be potentially jointly significant. We check this with an F-test using linearhypothesis from the car package, specified below at alpha 0.05, with two-tailed test:
+
+$$
+\begin{aligned}
+H_0: & \beta_{taxpc}=\beta_{pctymle}=0 \\
+H_a: & \text{H0 is not true}
+\end{aligned}
+$$
+
+```{r echo = FALSE}
+linearHypothesis(AIC.mixed, c("taxpc = 0", "pctymle = 0"), vcov = vcovHC)
+```
+
+We see that the since the p-value is 0.1529, which means we again fail to reject H0. As a result, we have support that these variables do not have joint significance. We will remove these variables from our model as a result.
+
+Next, we wanted to assess whether probability of conviction and length of prison sentence are important predictors. To do so, we specify a new model with these covariates:
+
+
+```{r echo = FALSE}
+prison.model <- lm(formula = data$logcrmrte ~ prbarr + prbconv + 
+                             polpc + pctmin80 + wfed + wsta + 
+                             prbpris + avgsen, 
+                             data = X_stepwise)
+```
+
+We then perform t-test, analogous to that above for mixed.AIC under the null hypothesis that these coefficients are 0:
+
+```{r echo = FALSE}
+coeftest(prison.model, vcov. = vcovHC, df=dim(X_wage_transformed)[1] - 8 - 1)
+```
+
+To our surprise, the t-test produced very high value for these coefficients, which means we fail to reject H0 that the coefficients are in fact 0. Again, we test joint significance: 
+
+```{r echo = FALSE}
+linearHypothesis(prison.model, c("prbpris = 0", "avgsen = 0"), vcov = vcovHC)
+```
+
+The p-value is very large. As a result, we have evidence there is not joint significance and will not include these variables in our final model.
+
+We saw from the EDA that many of the wage variables, with the exception of wsta, were correlated with each other. Even though each of the individuals variables did not make into our AIC model, could those excluded be jointly significant? We can test this by generating a model specfication with all wage variables. The null hypothesis for the test below is that all wage variables have a coefficient of 0:
+
+```{r echo = FALSE}
+model_wage <- lm(data$logcrmrte ~ prbarr + prbconv + polpc + pctmin80 + 
+                                  wfed + wsta + wcon + wtuc + wtrd + 
+                                  wfir + wser + wmfg + wloc, 
+                                  data = X_wage_transformed)
+coeftest(model_wage, vcov. = vcovHC, df=dim(X_wage_transformed)[1] - 13 - 1)
+```
+
+Checking the significance of each coefficient, none of the newly included wage variables are statistically significant on their own. We now check joint signficance with an F-test, under the null that there is no joint significance:
+
+```{r echo = FALSE}
+linearHypothesis(model_wage, c("wcon = 0", "wtuc = 0", "wtrd= 0", "wfir= 0" , "wser= 0" , "wmfg= 0" , "wloc= 0"), vconv=vcovHC)
+```
+
+These new wage variables were also not joint significantly due to a large p-value. Therefore, in accordance with the concept of parsimony, we will not include any other wage variables in our model.
+
+At this point, in every test so far, we see that prbarr and prbconv are consistently highly statistically significant. This brings up an interesting question as to whether an interaction exists between these two variables. Consider the two counties below:
+
+```{r echo = FALSE}
+stargazer(data %>% arrange(prbarr) %>% select('county', 'prbarr', prbconv) %>% slice(7,8),
+          type='text',
+          summary = F)
+```
+
+Both have nearly equivalent prbarr, but county 99 has a much higher prbconv. We believe that the effect of prbarr may be higher in county 99 due to an interaction between the two variables. The reason is that if criminals know they will be rarely convicted, they may not care very much if they get arrested, whereas if they know they will be convicted nearly every time, then the same prbarr will be a stronger deterrent. 
+
+We can test this hypothesis by including an interaction term into our regression, and perform hypothesis testing under the null hypothesis that the coefficient of the interaction is 0:
+
+```{r echo = FALSE}
+model_2_interaction <- lm(data$logcrmrte ~ prbarr + prbconv + 
+                            polpc + pctmin80 + wfed + wsta + 
+                            prbarr:prbconv, data = X_wage_transformed)
+coeftest(model_2_interaction, vcov. = vcovHC, df=dim(X_wage_transformed)[1] - 7 - 1)
+```
+We see that the p-value is 0.88, and as a result, fail to reject H0 that the interaction term is not 0. As a result, we will not include this interaction term in our final model.
+
+Based on experimenting with these alternative specifications, our AIC model, and statistical testing, we now arrive at our proposed model 2.
+
+```{r echo = FALSE}
+model_2 <- lm(data$logcrmrte ~ prbarr + prbconv + 
+                               polpc + pctmin80 + 
+                               wfed + wsta, 
+                               data = X_wage_transformed)
+```
+
+To further assess model_2, we want to use the RESET test to check our variable specification, and see if whether polynomial terms should be included in our model to improve its predictive power. At a significance level of 0.05:
+
+$$
+\begin{aligned}
+H_0: & \text{second order polynomial not needed} \\
+H_a: & \text{second order polynomial is needed} \\
+\end{aligned}
+$$
+
+```{r echo = FALSE}
+resettest(model_2, power=2, type='regressor')
+```
+
+Based on the RESET test, we see that polynomial terms will not help improve our model due to a large p-value.
+
+\subsection{Classical Linear Model Assumptions}
+
+We now access the CLM assumptions of our final model 2. 
+
+CLM 1 and 2 are identical to our model 1.
+
+**CLM 3: No perfect multi-collinearity**
+
+R confirmed no perfect multi-collinearity. The VIFs are also all significantly below 4, which means we do not have multi-collinearity to worry about:
+
+```{r echo = FALSE}
+vif(model_2)
+```
+
+**CLM 4: Zero Conditional Mean**
+
+To check zero conditional mean, we plot the residual against the fitted values for our set. 
+
+```{r echo = FALSE}
+plot(model_2, which = 1)
+```
+
+Based on this plot, we see that the line is very much linear even at extreme values. The average value of the residual is approximately 0 for all fitted vales. Zero Conditional Mean is met for our model of 6 variables.
+
+**CLM 5: Homoskedasticity**
+
+Examining the fitted values versus residuals plot, the spread is slightly larger around fitted values of around 3.5 (around -0.9 to 0.6) than around 4 (around -0.4 to 0.5). We can also check the scale-location plot:
+
+```{r echo = FALSE}
+plot(model_2, which=3)
+```
+We see that this line is roughly horizontal from -5 to -3. The only major curvature is the single data point around -4. This indicates that we most likely have close to homoskedasticity. 
+
+One way to test for homoskedasticity is the Breusch-Pagan Test. The null hypothesis of the test states that we have homoskedasticity. We will test at a standard significance level of 0.05.
+
+$$
+\begin{aligned}
+H_0: &\text{ Homoskedasticity}\\
+H_a: &\text{ Heteroskedasticity}
+\end{aligned}
+$$
+
+```{r echo = FALSE}
+bptest(model_2)
+```
+Since the $p-value < 0.05$, we reject the null hypothesis that we have homoskedasticity. Our sample size is relatively small, so the test suggests we have a major deviation from homoskedasticity.
+
+Since our visualization and hypothesis test gave inconsistent results, we will use heteroskedastic robust errors for reporting and statistical testing.
+
+**CLM 6: Normality**
+
+CLM 6 assumes that population error is independent of the explanatory variables $x_1$ through $x_k$, and that the error term is normally distributed with mean 0 and constant variance. We can check this with the qqplot of the fitted values versus residuals plot.
+
+```{r echo = FALSE}
+plot(model_2,which=2)
+```
+
+Not counting the extreme values, the data points wavering back and forth, which could indicate a kurtosis problem. Also, most differ from where we would like them to be on the line, so this indicates we most likely do not have normality of errors.
+
+We can visualise the residuals in a histogram.
+
+```{r echo = FALSE}
+bins <- seq(-0.9,0.9,0.1)
+ggplot(data = as.data.frame(model_2$fitted.values), aes(x=model_2$residuals))+
+  geom_histogram(alpha=0.8, breaks=bins)+
+  labs(title='Histogram of residuals',
+       x='Fitted values', 
+       y = "Count") +
+  theme_classic() +
+  ylim(0,20)+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks=seq(-1.2, 1, 0.3)) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=bins
+           )
+```
+Based on the histogram, the data does not appear very normal. The tail seems to taper off too fast from the peak in the middle. In any case, since our sample size 90 is much greater than 30, asymptotics also kicks in, ensuring that the sampling distribution of our coefficients are approximately normal.
+
+\subsection{Arrest versus conviction}
+
+In order to fully address our research question, we will test one more item about our model: 
+
+1. Is the effect of probability of arrest versus conviction the same on crime rate? If not, which fear variable is more important for deterring crime?
+
+To do this, we will use the linearHypothesis test from the car package.
+
+For both cases, we will test at a significance level of 0.05:
+
+$$
+\begin{aligned}
+H_0: & \text{the two coefficients are the same} \\
+H_a: & \text{the two coefficients are different} \\
+\end{aligned}
+$$
+
+```{r echo = FALSE}
+linearHypothesis(model_2, 'prbarr = prbconv', vcov=vcovHC)
+```
+
+We see that the difference is highly statistically significant, so reject H0 state that we have evidence suggesting the effects are different.
+
+```{r echo = FALSE}
+model_2$coefficients
+```
+
+Based on the value of the coefficients, since the coefficient of probability of arrest is larger, this variable is a stronger deterrent than probability of conviction.
+
+\subsection{Interpretation}
+
+Keeping all other variables constant, a 1% increase in wfed results in an approximately 1.16% increase crime rate. State wage seems to have a negative effect: a 1% increase state wage, keeping all other variables constant, results in a -0.52% change in crime rate. For all other variables, we take the exact transformation below as we did in model 1:
+
+$$
+\begin{aligned}
+\% \Delta \text{crmrte} &= 100 * [\exp(\beta*\Delta\text{variable}) - 1]\\
+\end{aligned}
+$$
+We do this in one step in R, looking at a 0.1 increase for the arrest and conviction variables, a 0.1 increase in pctmin80, and a 0.001 increase in polpc. We chose these values based on the size of the coefficients and provide the proper interpretation below:
+
+```{r echo = FALSE}
+c((exp(model_2$coefficients[2:3] * 0.1) - 1) * 100,
+  (exp(model_2$coefficients[5] * 0.1) - 1) * 100,
+  (exp(model_2$coefficients[4] * 0.001) - 1) * 100)
+```
+In this model, keeping all other variables constant, increasing prbarr by 0.1 units decreases crime by 23.1%, and increasing prbconv by 0.1 units decreases crime by 8.62%. These all seem like significant decreases in crime rate with a relatively small increase in the "fear factors." In addition, a 0.1 increase in pctmin80, or 1 additional minority per 1000 non-minority, increase crime by only 0.12%. This does not seem like a practically significant amount for a relatively small increase in minority population. Finally, a 0.001 increase in polpc, or an additional police officer for every 1000 people, will increase measured crime rate by 25.9%. This seems like a huge increase.
+
+We now have information for fully address our first two subquestions. We save recommendations for our final section of the report.
+
+1. Fear of arrest and convinctions are consistently the best deterrents of crime. Compared to each other, fear of arrest is statistically more signficant and also by a practical margin. By increasing arrest probability by 0.1, our model predicts a 23.1% decrease in crime, most likely noting that greater arrests leads to bigger sense of police presence, and a greater fear that crime committed will lead to an arrest.
+
+Police per capita is strongly correlated with crime rate. The more police presence, the more likely crime is detected and responded to. The more crime that is present in an area, the more police are necessary to keep order. Furthermore, we saw that police has one key outlier: county 51 has very high police per capita, high arrest and conviction rates, but low crime rate. This is likely an outlier where the capacity for police to respond to crime has met or exceed the rate of crime.
+
+2. Overall, most of the wage variables do not significantly influence crime rate, either on their own, or jointly within our models. The exception are federal wages and state wages. Federal wages in a county are positively related to crime, while state wages are negatively related with crime. 
+
+One interpretation could be that monetary incentives at the state level might be in place for individuals who are able to effectively combat crime (one example of this is the State Patrol). A higher the wage in one area for state employees could mean that more crime-combating individuals are present in that county, leading to lower crime rates, and higher overall pay as a result of those employees. 
+
+A positive correlation between wfed and crime rate could be a result of an omitted variable: general wealth level of the county. Higher ranking federal officials are much more likely to congregate in wealthy areas compared to poorer areas, and wealthier areas may be subject to more white-collar crime. We don't think that increasing federal salary would increase crime, but that the relationship is a result of a third variable.
+
+\pagebreak
+
+\section{Model 3}
+
+The purpose of our third model is to address our final research question, which is whether our parsimonious model 2 is robust to other covariates as measured by predictive power, and inference on the coefficients. We are especially interested in whether including density, the very strong single best predictor of crime rate, would greatly change our model conclusions. For model 3, we will include all co-variables. 
+
+First we evaluate whether this generates a reasonable AIC using the classical penalty term of k=2, and adjusted r squared, a parsimony-adjusted correlation coefficient.
+
+```{r echo = FALSE}
+model_3 <- lm(data$logcrmrte ~ ., data = X_wage_transformed)
+
+mod.3.fit <- data.frame(cbind(c(summary(model_3)$adj.r.squared, AIC(model_3, k=2)),
+          c(summary(model_2)$adj.r.squared, AIC(model_2, k=2))))
+rownames(mod.3.fit) <- c('Adj. R Squared', 'AIC') 
+colnames(mod.3.fit) <- c('Model 3', 'Model 2')
+
+stargazer(mod.3.fit,
+          summary = F,
+          type='text')
+```
+
+We see that including all covariates improves both the AIC and adjusted R^2, but not by much. However, the interpretation of Model 3 is much less clean than model 2 due to the presence of many more variables. Adding back variables such as density does not significantly alter our adj. R^2. 
+
+We then look at how much coefficients themselves actually change. 
+
+```{r echo = FALSE}
+model_2.coef <- model_2$coefficients
+model_3.coef2 <- model_3$coefficients[names(model_3$coefficients)  %in% names(model_2$coefficients)]
+perc.change <- (model_3.coef2 - model_2.coef)/model_2.coef * 100
+report <- cbind(model_2.coef, model_3.coef2, perc.change)
+colnames(report) <- c('model_2 coefficients', 'model_3_coefficients', 'percent_change')
+stargazer(report, summary=FALSE, header=FALSE, type='text')
+```
+
+Our coefficients have changed between ~20%-30%. Depending on the individual coefficient, this could represent a relatively large change. The largest percent change was in police. Rather than a 25.9% increase in crime for every 1 additional police officer for 1000 people, we now have a 16.9% increase using the same calculations shown previously.
+
+One very important fact is that none of the signs on the coefficients have changed, meaning the direction of influence was correctly predicted in model 2. By omitting the variables present in the dataset in model 2, we did not get different conclusions in terms of the direction of influence, although the magnitude of the effect was different than in model 3.
+
+We now evaluate the CLM assumptions.
+
+\subsection{Classical Linear Model Assumptions}
+
+CLM 1 and 2 are identical to our model 1.
+
+**CLM 3: No perfect multi-collinearity**
+
+R would have warned us if this were the case that we had perfect multi-collinearity, so in this case we have fulfilled this requirement. 
+
+```{r echo = FALSE}
+vif(model_3)
+```
+We see that all VIF factors except for density and urban are significantly below 4. Since we will not use model 3 for recommendations, but only as a validation that model 2 is robust, this high VIF factor is ok for our purposes.
+
+**CLM 4: Zero Conditional Mean**
+
+We plot the residual against the fitted values for our set. 
+
+```{r echo = FALSE}
+plot(model_3, which = 1)
+```
+
+We see that the line is very much linear except at the one extreme value of -2 fitted values. This is due to a single data point. At all other fitted values, the model looks decent. As a result, Zero Conditional Mean is met for our model of all variables.
+
+**CLM 5: Homoskedasticity**
+
+Examining the fitted values versus residuals plot above, we see that the spread appears to be slightly larger around fitted values of around -3.75 than around -4.25. We can also check the scale-location plot:
+
+```{r echo = FALSE}
+plot(model_3, which=3)
+```
+We see that this line is wavy from -5 to -2. This indicates that we most likely do not have homoskedasticity. 
+
+We check with the Breusch-Pagan Test at a standard significance level of 0.05.
+
+$$
+\begin{aligned}
+H_0: &\text{ Homoskedasticity}\\
+H_a: &\text{ Heteroskedasticity}
+\end{aligned}
+$$
+
+```{r echo = FALSE}
+bptest(model_3)
+```
+Since the $p-value > 0.05$, we fail to reject the null hypothesis that we have homoskedasticity, which gives us conflicting results. For our purposes, we will report heteroskedastic robust errors since we are not entire sure whether this assumption is fulfilled.
+
+**CLM 6: Normality**
+
+CLM 6 assumes that population error is independent of the explanatory variables $x_1$ through $x_k$, and that the error term is normally distributed with mean 0 and constant variance. We can check this with the qqplot of the fitted values versus residuals plot.
+
+```{r echo = FALSE}
+plot(model_3,which=2)
+```
+
+Not even counting the exception of extreme values, the data points generally do not lie on the line except toward the 0 quantiles. This indicates we most likely do not have normality of errors.
+
+We can visualise the residuals in a histogram.
+
+```{r echo = FALSE}
+bins <- seq(-0.9,0.6,0.1)
+ggplot(data = as.data.frame(model_3$residuals), aes(x=model_3$residuals))+
+  geom_histogram(alpha=0.8, breaks=bins)+
+  labs(title='Histogram of residuals',
+       x='Residuals', 
+       y = "Count") +
+  theme_classic() +
+  ylim(0,25)+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks=bins) +
+  stat_bin(aes(y=..count.., label=(..count..)), 
+           geom="text", 
+           vjust=-.5,
+           breaks=bins
+           )
+```
+Based on the histogram, the data does not appear very normal with possibly two peaks close to each other. Since our sample size 90 is much greater than 30, asymptotics also kicks in, ensuring that the sampling distribution of our coefficients are approximately normal.
+
+\subsection{Interpretation}
+
+At this point, we can perform hypothesis testing with robust standard errors to see which variables are significant when all co-variates are included in the model. 
+
+For all the betas, we will use a 2-sided test as significance level 0.05:
+
+$$
+\begin{aligned}
+H_0: & \beta_j=0 \\
+H_a: & \beta_j\ne 0
+\end{aligned}
+$$
+
+```{r echo = FALSE}
+coeftest(model_3, vcov. = vcovHC, df=dim(X_wage_transformed)[1] - 22 - 1)
+```
+
+In this model, probability of arrest and probability of conviction are still both highly statistically significant. Percent minority, federal wages, and interestingly, percent young male, are both statistically significant at the 0.05 significance level. Police per capita, and density, are only significant at the 0.1 significance level. 
+
+The only variable not in model 2 but is significant in model 3 is percent young male. Aside from this, no additional variables were individually significant. We now perform the Wald test to see if the addition variables included in model 3 are jointly statistically significant. We use the robust standard errors. We use a significance level of 0.05, and our hypotheses are as follows:
+
+$$
+\begin{aligned}
+H_0: & \text{additional model 3 variables are not jointly signficant} \\
+H_a: & \text{additional model 3 variables are jointly signficant}
+\end{aligned}
+$$
+
+```{r echo = FALSE}
+waldtest(model_2, model_3, vcov = vcovHC)
+```
+
+Based on the Wald test, since the p-value > 0.05, we fail to reject H0 and have found evidence that the additional variables in model 3 are not jointly significant. This would indicate that model 2 is as good as model 3 in terms of capturing statistically significant predictors, both individually and jointly.
+
+With these results, we answer our final research question:
+
+3. By including only 6 co-variates, prbarr, prbconv, polpc, pctmin80, wfed, wsta, we have built a model that is robust to a model with 22 co-variates. Our model has very similar measures of fit. While the magnitude of the coefficients change by 20-30% across the board, both models provide the same conclusions for policy due to the fact that the sign on our coefficients are the same across the board. Finally, we see from hypothesis testing that the additional covariates are not jointly significant, and all but one of the covariates are actually statistically significant on their own. As a result, we believe that our model 2 is both predictive and robust, generalizable to both regions with and without high population density. Model 2 is our preferred model in terms of making policy recommendations.
+
+\pagebreak
+
+\section{Regression Table}
+
+We now present a regression table for our 3 models. We have discussed the practical significance of our variables are part of the model building process, and concluded that prbarr, prbconv, polpc are both practical significant, while pctmin80 was not practically significant. Please see model sections for details.
+
+```{r echo = FALSE, results = "asis"} 
+se.model1 <- sqrt(diag(vcovHC(model_1)))
+se.model2 <- sqrt(diag(vcovHC(model_2)))
+se.model3 <- sqrt(diag(vcovHC(model_3)))
+se <- list(se.model1, se.model2, se.model3)
+names(se) <- c('model 1', 'model 2', 'model 3')
+
+stargazer(model_1, model_2, model_3, 
+          omit.stat=c('F', 'ser'), type='latex', align=TRUE,
+          single.row=TRUE,
+          column.sep.width = "-30pt",
+          order=c(23,1,2,20,21,11,17,10,5,3,4,6,7,8,9,12,13,14,15,16,18,19,22),
+          se = se,
+          dep.var.labels=c("Log of crimes per person"),
+          title="Regression to predict log of crimes per person from co-variates",
+          header = FALSE,
+          star.cutoffs = c(0.05, 0.01, 0.001))
+```
+\pagebreak
+\section{Additional Omitted Variable Bias}
+
+While omitted variables have been discussed throughout our report, we focus our attention to global variables that might be influencing all of our models here.
+
+In our first regression model, we found that non-customer facing blue collar wages in construction and manufacturing were not significant in predicting crime rate. An omitted variable influencing these variables is education. We believe that counties with high educations will have higher wages in these sectors, perhaps because more of these individuals make it to management level, or are more efficient at their jobs. Education should also be negatively correlated with crime. One reason could be that those individuals have more exposure to ethics as education level increases. For the two specifications below, imagine that the second model is the true causal model:
+
+$$
+crmrte = \delta_0 + \delta_1 * wcon\\
+crmrte = \beta_0 + \beta_1 * wcon + \beta_2 * edlvl
+$$
+The omitted variable bias can be derived from the regression of edlvl on wcon :
+
+$$
+edlvl = \alpha_0 + \alpha_1 * wcon
+$$
+
+In this case, the omitted variable bias is beta2 * alpha1. We believe that alpha1 is positive and beta2 is negative, so the bias is negative. This means that the observed coefficient is smaller than the actual. For wcon (positive), the analysis suggests the size of the coefficient is even more positive, so this variable might in fact become significant as a result of including education level. Of course, this analysis is greatly simplified. In reality, education levels will likely correlate with many of the independent variable and can have much more profound effects. 
+
+Another source of omitted variable bias is what we will call family happiness. Counties with more individuals who are happily married with kids might receive a very high score, while those with more individuals who recently divorced may have a low score. We expect the happier someone is with their family, the less likely they will commit any type of crime. Counties with happier families could see higher overall wages as well because those who are happy at home tend to be more productive and likable at the work place. This results in a negative omitted variable bias, and a smaller observed coefficient compared to the true casual model. This could influence recommendations for wage changes, since increases might have a stronger effect than anticipated. 
+
+We saw that police per capita was a positive predictor of crime, but an omitted variable that strongly correlates with police per capita is the general effectiveness of police officers. This can be measured by how long it takes officers to resolve similar cases across counties, how many officers are required for similar tasks, etc. We expect the more effective the police force, the less police needed to manage crime in a county. Furthermore, the more effective the police force, the lower the crime rate, due to faster and more effective approaches to controlling crime and dealing with criminals. Therefore, the omitted variable bias is positive, meaning the observed coefficient on police per capital is larger than what we would expect with this variable included. This coefficient is currently very large, and unfortunately, we have no way of knowing whether the true coefficient is even positive given this bias. As a result, effectiveness of the police force is a necessary metric to even more accurately measure the effect of police per capita on crime rate.
+
+Cost of living is another omitted variable. We would expect a positive correlation between wage and cost of living (jobs in the cities tend to pay more). Additionally, cost of living likely is positively correlated with crime rate, as people are more likely to be below the poverty line and in need of more income. This omitted variable would have a positive bias on the coefficient of our wage variables, artificially inflating them in our model. Since wage of federal employees is a strong predictor of crime in our model, this effect may be diminished if all federal employees also work in regions of high cost of living.
+
+Substance abuse is a major driver behind certain forms of crime. A closely related factor is the ability to access rehabilitation. The higher the ability, the greater chance the individual can re-enter society, and lower the crime. Studies show that while minorities are much less likely to find accessible care due to financial and social factors [8]. As a result, we expect the ability to recover from substance abuse is negatively correlated with percent minority. The omitted variable bias is positive, meaning the observed coefficient on percent minority is smaller than the true causal model. We showed this variable was statistically significant, but not highly significant. Adding this omitted variable could drive the coefficient toward 0. We would certainly like to make policy changes such that in the true causal model of the world, race is not a significant predictor of crime rate. 
+
+
+\pagebreak
+\section{Policy Recommendations and Concluding Remarks}
+
+Full discussion of our research questions 1 and 2 were included in the discussion of model 2. Our research question 3 was discussed as part of model 3. Below is a brief summary of our conclusions.
+
+\textit{How does fear of arrest and convictions deter crime across North Carolina? }   
+
+We showed that in all models, arrest and conviction probabilities were highly statistically significant deterrents of crime, and that arrest was statistically even more significant than convictions. Within this, police per capita had a moderating effect. The more police, the greater the rate of arrest and convictions, and greater (what we propose) the crime detection rate.
+
+\textit{How does wage for all types of employees influence overall crime rate? }
+
+Federal wages and state wages were statistically significant. State wages were negatively correlated with crime rate, and we believe this could in part be due to that fact that state employees who are effective at combating might be rewarded with monetary gains, leading to higher compensation for regions with lower crime due to the presence of these individuals. The positive correlation of federal wages with crime is likely due to the fact that high ranking federal officials tend to aggregate in wealthier areas.
+
+\textit{What variables are strong predictors of crime, and at the same time are robust across the entire state, irrespective of location and population density? } 
+
+According to the developed model, all variables in model 2 are significant, and robust in terms of fit and coefficient signs to adding in all co-variables from model 3. 
+
+From these results, we propose the following policy recommendations for the North Carolina campaigner focusing on crime:
+
+1) Revision of state law to reinforce arrest and conviction. Specially, since the perception of the likelihood of arrest and conviction are both strong deterrents of crime, police and the legal system should be less lenient toward arresting and convicting detected criminals. If the campaign were to focus on a single aspect, arrest probability is more important than convictions. This is good news because arrest is usually cheaper and faster to carry out, requiring less legal workers compared to convictions. Since we believe that these variables are significant due to fear of being caught, greater publicity of arrest and conviction through media may serve the same purpose.
+
+2) We see that the police per capita is a positive predictor of crime in all regions except for one where the police number are extremely high. This is likely due to the fact that increased police force increases the level of crime detection. For the one county with very high police per capita, it is likely that the police levels exceed what is needed to detect and handle crime in a timely manner. We recommend increase the police workforce in order to detect more of the crime, which could also increase the opportunities for recommendation #1 (greater publicity of arrests). In addition, this would increase the level of perceived and measured security, and hence, could be used as an argument for a direct improvement on the life quality of voters.  
+
+3) While minorities percent is only somewhat statistically significant, systematic difference in crime rate between racial groups presents a social problem that a political campaign can strongly leverage. We also noted that inability to rehabilitate from drug abuse is a potential omitted variable bias. We recommend that further studies should be conducted on counties with large minority groups, and actions be take appropriately. For example, it may be possible that stronger job placement programs for minorities would decrease the chance that someone that in the population would commit a crime, and better rehabilitation programs might even eliminate race as a predictor for crime rate.
+
+4) We see that state salaries is negatively correlated with crime. One reason could be that state officials, such as the State Patrol, who are effective at combating crime are rewarded with higher pay, resulting in counties with less crime appearing to have higher state pay. We encourage policies that increase the salary and bonuses of workers in the criminal field, including the police and state patrol officials. Such as policy change would also be viewed in a positive light by the public and beneficial for the campaige.
+
+5) Finally, our model 2 with only 6 co-variates retained the predictive power of model 3 with 22 co-variates, which included regional factors such as west versus central, as well as population differences such as density. As a result, we recommend a more state-wide approach to criminal policy change rather than regional changes. Our 6 co-variates are independent of region and density, and are furthermore robust to them, indicating that these 6 underlying factors are important predictors of crime regardless of regional differences in crime patterns. 
+
+\pagebreak
+\section{References}
+
+[1] 'The Preassure Cooker: Population Density and Crime'. Steinmetz, David (Jul 20, 2016). NYC Data Science Academy. https://nycdatascience.com/blog/student-works/pressure-cooker-higher-population-densities-increase-crime/
+
+[2] 'Taxing, Spending, and Voting: Voter Turnout Rates in Statewide Elections in Comparative Perspective'. Garrick L. Percival, Mary Currin-Percival, Shaun Bowler and Henk van der Kolk State & Local Government Review Vol. 39, No. 3 (2007), pp. 131-143 https://www.jstor.org/stable/25130415?seq=1
+
+[3] 'Criminal Behavior, Sanctions, and Income Taxation: An Economic Analysis'.Avraham D. Tabbach. The Journal of Legal Studies. Vol. 32, No. 2 (June 2003), pp. 383-406
+
+[4] 'Gender and Crime: Toward a Gendered Theory of Female Offending'. Darrell Steffensmeier and Emilie Allan. Annual Review of Sociology Vol. 22 (1996), pp. 459-487 https://www.jstor.org/stable/2083439?seq=1
+
+[5] 'Crime and the minimum wage'. Christine Braun. Review of Economic Dynamics Volume 32, April 2019, Pages 122-152. https://www.sciencedirect.com/science/article/pii/S1094202518302941
+
+[6] 'Why the Police Have an Effect on Violent Crime After All: Evidence from the British Crime Survey'. Ben Vollaard and Joseph Hamed. The Journal of Law & Economics. Vol. 55, No. 4 (November 2012), pp. 901-924 https://www.jstor.org/stable/10.1086/666614?seq=1
+
+[7] 'There’s overwhelming evidence that the criminal-justice system is racist. Here’s the proof'. Radley Balko. The Washington Post. September 18, 2018. https://www.washingtonpost.com/news/opinions/wp/2018/09/18/theres-overwhelming-evidence-that-the-criminal-justice-system-is-racist-heres-the-proof/
+
+[8] “Addiction Among Different Races.” Sunrise House, Editorial Staff. July 9, 2019. https://sunrisehouse.com/addiction-demographics/different-races/.
+
+*I thank Gaby May-Lagunes for her invaluable contributions. This work was done as part of the W203 - Statistics for Data Science course under the U.C. Berkeley Master of Information and Data Science program.
+
